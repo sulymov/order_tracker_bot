@@ -468,15 +468,13 @@ async def show_in_progress_orders(message: types.Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
 
-# --- ДЕТАЛІ ЗАВДАННЯ ТА КНОПКА ВИДАЛЕННЯ ---
+# --- ДЕТАЛІ ЗАВДАННЯ ТА КНОПКИ ---
 
-@router.callback_query(F.data.startswith("view_order_"))
-async def view_order_card(callback: types.CallbackQuery):
-    order_id = int(callback.data.split("_")[2])
+async def view_order_card_by_id(callback: types.CallbackQuery, order_id: int):
     order, items = await db.get_order_details(order_id, callback.from_user.id)
 
     if not order:
-        await callback.answer("Завдання не знайдено.", show_alert=True)
+        await callback.message.edit_text("Завдання не знайдено або було видалено.")
         return
 
     _, title, status, first_name, last_name, phone, address = order
@@ -508,6 +506,9 @@ async def view_order_card(callback: types.CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [
+            InlineKeyboardButton(text="✏️ Редагувати завдання", callback_data=f"edit_order_{order_id}")
+        ],
+        [
             InlineKeyboardButton(text="🗑 Видалити завдання", callback_data=f"confirm_delete_order_{order_id}")
         ],
         [
@@ -516,6 +517,12 @@ async def view_order_card(callback: types.CallbackQuery):
     ])
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("view_order_"))
+async def view_order_card(callback: types.CallbackQuery):
+    order_id = int(callback.data.split("_")[2])
+    await view_order_card_by_id(callback, order_id)
 
 @router.callback_query(F.data == "back_to_orders")
 async def back_to_orders_handler(callback: types.CallbackQuery):
@@ -586,3 +593,242 @@ async def delete_order_action(callback: types.CallbackQuery):
 
     else:
         await callback.answer("❌ Помилка під час видалення.", show_alert=True)
+
+
+# --- РЕДАГУВАННЯ ЗАВДАННЯ ---
+
+class EditOrder(StatesGroup):
+    menu = State()
+    waiting_for_title = State()
+    item_name = State()
+    item_unit = State()
+    item_price = State()
+    item_quantity = State()
+
+
+async def show_edit_menu(event: types.Message | types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    title = data.get("title", "")
+    items = data.get("items", [])
+
+    text = f"✏️ <b>Редагування завдання:</b> {title}\n\n"
+
+    if not items:
+        text += "<i>Позицій ще немає.</i>\n\n"
+    else:
+        text += "<b>Складники кошторису:</b>\n"
+        total = 0
+        for i, item in enumerate(items, 1):
+            icon = "🛠" if item["item_type"] == "work" else "📦"
+            cost = item["unit_price"] * item["quantity"]
+            total += cost
+            text += f"{i}. {icon} {item['name']} — {item['quantity']} {item['unit']} × {item['unit_price']} грн = <b>{cost:.2f} грн</b>\n"
+        text += f"\n💳 <b>Разом:</b> {total:.2f} грн\n"
+
+    kb_rows = []
+    for i, item in enumerate(items):
+        kb_rows.append([
+            InlineKeyboardButton(text=f"🖊 {i + 1}. {item['name'][:20]}", callback_data=f"edit_item_{i}"),
+            InlineKeyboardButton(text="🗑", callback_data=f"edit_del_item_{i}"),
+        ])
+
+    kb_rows.append([
+        InlineKeyboardButton(text="➕ Додати роботу", callback_data="edit_add_type_work"),
+        InlineKeyboardButton(text="📦 Додати матеріал", callback_data="edit_add_type_material"),
+    ])
+    kb_rows.append([
+        InlineKeyboardButton(text="✏️ Змінити назву", callback_data="edit_change_title"),
+    ])
+    kb_rows.append([
+        InlineKeyboardButton(text="✅ Зберегти зміни", callback_data="edit_save"),
+        InlineKeyboardButton(text="❌ Відмінити зміни", callback_data="edit_cancel"),
+    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+
+    if isinstance(event, types.CallbackQuery):
+        await event.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    else:
+        await event.answer(text, parse_mode="HTML", reply_markup=kb)
+
+
+@router.callback_query(F.data.startswith("edit_order_"))
+async def start_edit_order(callback: types.CallbackQuery, state: FSMContext):
+    order_id = int(callback.data.split("_")[2])
+    order, items_raw = await db.get_order_details(order_id, callback.from_user.id)
+
+    if not order:
+        await callback.answer("Завдання не знайдено.", show_alert=True)
+        return
+
+    items = [
+        {
+            "item_type": item_type,
+            "name": name,
+            "unit": unit,
+            "unit_price": unit_price,
+            "quantity": quantity,
+        }
+        for item_type, name, unit, unit_price, quantity, _ in items_raw
+    ]
+
+    await state.update_data(edit_order_id=order_id, title=order[1], items=items, editing_index=None)
+    await state.set_state(EditOrder.menu)
+    await show_edit_menu(callback, state)
+
+
+@router.callback_query(EditOrder.menu, F.data == "edit_change_title")
+async def edit_change_title_start(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(EditOrder.waiting_for_title)
+    await callback.message.answer(
+        "📝 Введи нову назву завдання:",
+        reply_markup=cancel_kb(show_skip=False),
+    )
+
+
+@router.message(EditOrder.waiting_for_title)
+async def edit_change_title_process(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(EditOrder.menu)
+    await show_edit_menu(message, state)
+
+
+@router.callback_query(EditOrder.menu, F.data.startswith("edit_add_type_"))
+async def edit_start_add_item(callback: types.CallbackQuery, state: FSMContext):
+    item_type = callback.data.split("_")[3]
+    await state.update_data(current_item_type=item_type, editing_index=None)
+    await state.set_state(EditOrder.item_name)
+    type_str = "роботи" if item_type == "work" else "матеріалу"
+    await callback.message.answer(
+        f"🔹 Введи назву {type_str}:",
+        reply_markup=cancel_kb(show_skip=False),
+    )
+
+
+@router.callback_query(EditOrder.menu, F.data.startswith("edit_item_"))
+async def edit_start_edit_item(callback: types.CallbackQuery, state: FSMContext):
+    index = int(callback.data.split("_")[2])
+    data = await state.get_data()
+    items = data.get("items", [])
+
+    if index >= len(items):
+        await callback.answer("Позицію не знайдено.", show_alert=True)
+        return
+
+    item = items[index]
+    await state.update_data(current_item_type=item["item_type"], editing_index=index)
+    await state.set_state(EditOrder.item_name)
+    type_str = "роботи" if item["item_type"] == "work" else "матеріалу"
+    await callback.message.answer(
+        f"🔹 Поточна назва: <b>{item['name']}</b>\nВведи нову назву {type_str} (або надішли ту саму):",
+        parse_mode="HTML",
+        reply_markup=cancel_kb(show_skip=False),
+    )
+
+
+@router.callback_query(EditOrder.menu, F.data.startswith("edit_del_item_"))
+async def edit_delete_item(callback: types.CallbackQuery, state: FSMContext):
+    index = int(callback.data.split("_")[3])
+    data = await state.get_data()
+    items = data.get("items", [])
+
+    if index >= len(items):
+        await callback.answer("Позицію не знайдено.", show_alert=True)
+        return
+
+    items.pop(index)
+    await state.update_data(items=items)
+    await callback.answer("🗑 Позицію видалено (не забудь зберегти зміни).")
+    await show_edit_menu(callback, state)
+
+
+@router.message(EditOrder.item_name)
+async def edit_process_item_name(message: types.Message, state: FSMContext):
+    await state.update_data(current_item_name=message.text.strip())
+    await state.set_state(EditOrder.item_unit)
+    units_kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="шт"), KeyboardButton(text="год"), KeyboardButton(text="послуга")],
+            [KeyboardButton(text="м²"), KeyboardButton(text="комплект")],
+            [KeyboardButton(text="❌ Скасувати")],
+        ],
+        resize_keyboard=True,
+    )
+    await message.answer("📐 Вкажи одиницю виміру:", reply_markup=units_kb)
+
+
+@router.message(EditOrder.item_unit)
+async def edit_process_item_unit(message: types.Message, state: FSMContext):
+    await state.update_data(current_item_unit=message.text.strip())
+    await state.set_state(EditOrder.item_price)
+    await message.answer("💰 Вкажи ціну за одиницю (у грн):", reply_markup=cancel_kb(show_skip=False))
+
+
+@router.message(EditOrder.item_price)
+async def edit_process_item_price(message: types.Message, state: FSMContext):
+    try:
+        price = float(message.text.replace(",", "."))
+        await state.update_data(current_item_price=price)
+        await state.set_state(EditOrder.item_quantity)
+        await message.answer("🔢 Вкажи кількість:", reply_markup=cancel_kb(show_skip=False))
+    except ValueError:
+        await message.answer("❌ Будь ласка, введи число! Спробуй ще раз:")
+
+
+@router.message(EditOrder.item_quantity)
+async def edit_process_item_quantity(message: types.Message, state: FSMContext):
+    try:
+        qty = float(message.text.replace(",", "."))
+        data = await state.get_data()
+        new_item = {
+            "item_type": data["current_item_type"],
+            "name": data["current_item_name"],
+            "unit": data["current_item_unit"],
+            "unit_price": data["current_item_price"],
+            "quantity": qty,
+        }
+        items = data.get("items", [])
+        editing_index = data.get("editing_index")
+
+        if editing_index is None:
+            items.append(new_item)
+        else:
+            items[editing_index] = new_item
+
+        await state.update_data(items=items, editing_index=None)
+        await state.set_state(EditOrder.menu)
+        await show_edit_menu(message, state)
+
+    except ValueError:
+        await message.answer("❌ Будь ласка, введи число! Спробуй ще раз:")
+
+
+@router.callback_query(EditOrder.menu, F.data == "edit_save")
+async def edit_save_order(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    order_id = data["edit_order_id"]
+    title = data["title"]
+    items = data.get("items", [])
+
+    if not items:
+        await callback.answer("⚠️ У завданні має бути хоча б одна позиція!", show_alert=True)
+        return
+
+    success = await db.update_order(order_id, callback.from_user.id, title, items)
+    await state.clear()
+
+    if not success:
+        await callback.answer("❌ Помилка збереження.", show_alert=True)
+        return
+
+    await callback.answer("✅ Зміни збережено!", show_alert=True)
+    await view_order_card_by_id(callback, order_id)
+
+
+@router.callback_query(EditOrder.menu, F.data == "edit_cancel")
+async def edit_cancel_order(callback: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    order_id = data.get("edit_order_id")
+    await state.clear()
+    await callback.answer("Зміни скасовано.")
+    await view_order_card_by_id(callback, order_id)

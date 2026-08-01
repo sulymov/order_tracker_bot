@@ -264,3 +264,42 @@ async def delete_order(order_id: int, user_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0 
+    
+async def update_order(order_id: int, user_id: int, title: str, items: list) -> bool:
+    """Оновлення назви та повного списку позицій завдання (перезапис)"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("PRAGMA foreign_keys = ON;")
+
+        cursor = await db.execute(
+            "UPDATE orders SET title = ? WHERE id = ? AND user_id = ?",
+            (title, order_id, user_id),
+        )
+
+        if cursor.rowcount == 0:
+            return False
+
+        await db.execute("DELETE FROM order_items WHERE order_id = ?", (order_id,))
+
+        items_data = [
+            (
+                order_id,
+                item["item_type"],
+                item["name"],
+                item["unit"],
+                item["unit_price"],
+                item["quantity"],
+                item["unit_price"] * item["quantity"],
+            )
+            for item in items
+        ]
+
+        await db.executemany(
+            """
+            INSERT INTO order_items (order_id, item_type, name, unit, unit_price, quantity, total_price)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            items_data,
+        )
+
+        await db.commit()
+        return True
