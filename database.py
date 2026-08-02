@@ -317,3 +317,38 @@ async def complete_order(order_id: int, user_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+async def get_user_clients_with_order_count(user_id: int):
+    """Список клієнтів разом із кількістю пов'язаних завдань (для позначення 'сирітських' замовників)"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            """
+            SELECT c.id, c.first_name, c.last_name, c.phone, COUNT(o.id) as order_count
+            FROM clients c
+            LEFT JOIN orders o ON o.client_id = c.id
+            WHERE c.user_id = ?
+            GROUP BY c.id
+            ORDER BY c.id DESC
+            """,
+            (user_id,),
+        ) as cursor:
+            return await cursor.fetchall()
+
+
+async def delete_client(client_id: int, user_id: int) -> bool:
+    """Видалення замовника, лише якщо з ним не пов'язано жодного завдання"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM orders WHERE client_id = ?", (client_id,)
+        ) as cursor:
+            (count,) = await cursor.fetchone()
+
+        if count > 0:
+            return False
+
+        cursor = await db.execute(
+            "DELETE FROM clients WHERE id = ? AND user_id = ?",
+            (client_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0

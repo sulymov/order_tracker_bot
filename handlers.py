@@ -83,21 +83,24 @@ async def cancel_handler(
 
 # --- 1. КРОК: НАТИСКАННЯ "➕ НОВЕ ЗАВДАННЯ" ---
 
-@router.message(F.text == "➕ Нове завдання")
+async def show_client_selection(event: types.Message | types.CallbackQuery, state: FSMContext):
+    user_id = event.from_user.id
+    clients = await db.get_user_clients_with_order_count(user_id)
 
-async def start_new_order(message: types.Message, state: FSMContext):
-    clients = await db.get_user_clients(message.from_user.id)
     kb = []
-    for client_id, first_name, last_name, phone in clients:
+    for client_id, first_name, last_name, phone, order_count in clients:
         full_name = f"{first_name} {last_name or ''}".strip()
-        kb.append(
-            [
-                InlineKeyboardButton(
-                    text=f"👤 {full_name} ({phone})",
-                    callback_data=f"select_client_{client_id}",
-                )
-            ]
-        )
+        row = [
+            InlineKeyboardButton(
+                text=f"👤 {full_name} ({phone})",
+                callback_data=f"select_client_{client_id}",
+            )
+        ]
+        if order_count == 0:
+            row.append(
+                InlineKeyboardButton(text="🗑 Видалити", callback_data=f"confirm_delete_client_{client_id}")
+            )
+        kb.append(row)
 
     kb.append(
         [
@@ -115,12 +118,62 @@ async def start_new_order(message: types.Message, state: FSMContext):
         ]
     )
 
+    text = "👤 **Обери замовника зі списку або додай нового:**\n<i>Кнопкою \"Видалити\" позначені замовники без жодного завдання.</i>"
+
+    if isinstance(event, types.CallbackQuery):
+        await event.message.edit_text(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+        )
+    else:
+        await event.answer(
+            text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+        )
+
+
+@router.message(F.text == "➕ Нове завдання")
+
+async def start_new_order(message: types.Message, state: FSMContext):
     await state.set_state(CreateOrder.selecting_client)
-    await message.answer(
-        "👤 **Обери замовника зі списку або додай нового:**",
+    await show_client_selection(message, state)
+
+
+# --- ВИДАЛЕННЯ ЗАМОВНИКА БЕЗ ЗАВДАНЬ ---
+
+@router.callback_query(F.data.startswith("confirm_delete_client_"))
+async def confirm_delete_client_dialog(callback: types.CallbackQuery):
+    client_id = int(callback.data.split("_")[3])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⚠️ Так, видалити", callback_data=f"delete_client_now_{client_id}"),
+            InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_delete_client"),
+        ]
+    ])
+    await callback.message.edit_text(
+        "❓ **Видалити цього замовника?**\nЦю дію не можна скасувати.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+        reply_markup=kb,
     )
+
+
+@router.callback_query(F.data == "cancel_delete_client")
+async def cancel_delete_client_handler(callback: types.CallbackQuery, state: FSMContext):
+    await show_client_selection(callback, state)
+
+
+@router.callback_query(F.data.startswith("delete_client_now_"))
+async def delete_client_action(callback: types.CallbackQuery, state: FSMContext):
+    client_id = int(callback.data.split("_")[3])
+    success = await db.delete_client(client_id, callback.from_user.id)
+
+    if success:
+        await callback.answer("✅ Замовника видалено!", show_alert=True)
+    else:
+        await callback.answer(
+            "❌ Не вдалося видалити — з цим замовником вже пов'язане завдання.",
+            show_alert=True,
+        )
+
+    await show_client_selection(callback, state)
 
 # --- 2. ПОКРОКОВЕ ДОДАВАННЯ НОВОГО ЗАМОВНИКА ---
 
