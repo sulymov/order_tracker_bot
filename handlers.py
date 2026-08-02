@@ -823,6 +823,7 @@ async def edit_save_order(callback: types.CallbackQuery, state: FSMContext):
 
     await callback.answer("✅ Зміни збережено!", show_alert=True)
     await view_order_card_by_id(callback, order_id)
+    await callback.message.answer("🚀 Продовжуємо роботу", reply_markup=main_keyboard())
 
 
 @router.callback_query(EditOrder.menu, F.data == "edit_cancel")
@@ -832,3 +833,4 @@ async def edit_cancel_order(callback: types.CallbackQuery, state: FSMContext):
     await state.clear()
     await callback.answer("Зміни скасовано.")
     await view_order_card_by_id(callback, order_id)
+    await callback.message.answer("🚀 Продовжуємо роботу", reply_markup=main_keyboard())
