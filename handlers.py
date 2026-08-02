@@ -468,6 +468,36 @@ async def show_in_progress_orders(message: types.Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
 
+# --- ПЕРЕГЛЯД ВИКОНАНИХ ЗАВДАНЬ ---
+
+@router.message(F.text == "📁 Виконані завдання")
+async def show_completed_orders(message: types.Message):
+    orders = await db.get_user_orders(message.from_user.id, status='completed')
+
+    if not orders:
+        await message.answer(
+            "📭 У вас ще немає виконаних завдань.",
+            reply_markup=main_keyboard()
+        )
+        return
+
+    kb = []
+
+    for order_id, title, first_name, last_name, _ in orders:
+        client_str = f" ({first_name} {last_name or ''})".strip() if first_name else ""
+        kb.append([
+            InlineKeyboardButton(
+                text=f"✅ №{order_id}: {title}{client_str}",
+                callback_data=f"view_order_{order_id}"
+            )
+        ])
+
+    await message.answer(
+        "📁 **Виконані завдання:**\nОбери завдання для перегляду детальної інформації:",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
 # --- ДЕТАЛІ ЗАВДАННЯ ТА КНОПКИ ---
 
 async def view_order_card_by_id(callback: types.CallbackQuery, order_id: int):
@@ -504,17 +534,27 @@ async def view_order_card_by_id(callback: types.CallbackQuery, order_id: int):
     text += f"📉 **Матеріали:** {total_mat:.2f} грн\n"
     text += f"💰 **Прибуток:** {total_work:.2f} грн\n"
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
+    kb_rows = [
         [
             InlineKeyboardButton(text="✏️ Редагувати завдання", callback_data=f"edit_order_{order_id}")
         ],
-        [
-            InlineKeyboardButton(text="🗑 Видалити завдання", callback_data=f"confirm_delete_order_{order_id}")
-        ],
-        [
-            InlineKeyboardButton(text="⬅️ Назад до списку", callback_data="back_to_orders")
-        ]
+    ]
+
+    if status == "in_progress":
+        kb_rows.append([
+            InlineKeyboardButton(text="✅ Помітити як виконане", callback_data=f"confirm_complete_order_{order_id}")
+        ])
+
+    kb_rows.append([
+        InlineKeyboardButton(text="🗑 Видалити завдання", callback_data=f"confirm_delete_order_{order_id}")
     ])
+
+    back_callback = "back_to_orders" if status == "in_progress" else "back_to_completed_orders"
+    kb_rows.append([
+        InlineKeyboardButton(text="⬅️ Назад до списку", callback_data=back_callback)
+    ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
@@ -543,6 +583,26 @@ async def back_to_orders_handler(callback: types.CallbackQuery):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
     )
 
+
+@router.callback_query(F.data == "back_to_completed_orders")
+async def back_to_completed_orders_handler(callback: types.CallbackQuery):
+    orders = await db.get_user_orders(callback.from_user.id, status='completed')
+    kb = []
+    for order_id, title, first_name, last_name, _ in orders:
+        client_str = f" ({first_name} {last_name or ''})".strip() if first_name else ""
+        kb.append([
+            InlineKeyboardButton(
+                text=f"✅ №{order_id}: {title}{client_str}",
+                callback_data=f"view_order_{order_id}"
+            )
+        ])
+
+    await callback.message.edit_text(
+        "📁 **Виконані завдання:**",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
+
 # --- ПІДТВЕРДЖЕННЯ ТА ВИДАЛЕННЯ ЗАВДАННЯ ---
 
 @router.callback_query(F.data.startswith("confirm_delete_order_"))
@@ -564,14 +624,28 @@ async def confirm_delete_order_dialog(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("delete_order_now_"))
 async def delete_order_action(callback: types.CallbackQuery):
     order_id = int(callback.data.split("_")[3])
+
+    order, _ = await db.get_order_details(order_id, callback.from_user.id)
+    order_status = order[2] if order else "in_progress"
+
     success = await db.delete_order(order_id, callback.from_user.id)
 
     if success:
         await callback.answer("✅ Завдання успішно видалено!", show_alert=True)
-        # Повертаємось до списку завдань
-        orders = await db.get_user_orders(callback.from_user.id, status='in_progress')
+
+        orders = await db.get_user_orders(callback.from_user.id, status=order_status)
+
+        if order_status == "in_progress":
+            empty_text = "📭 У вас більше немає активних завдань у роботі."
+            list_title = "⏳ **Завдання в роботі:**"
+            icon = "📌"
+        else:
+            empty_text = "📭 У вас більше немає виконаних завдань."
+            list_title = "📁 **Виконані завдання:**"
+            icon = "✅"
+
         if not orders:
-            await callback.message.edit_text("📭 У вас більше немає активних завдань у роботі.")
+            await callback.message.edit_text(empty_text)
             return
 
         kb = []
@@ -580,19 +654,72 @@ async def delete_order_action(callback: types.CallbackQuery):
             client_str = f" ({first_name} {last_name or ''})".strip() if first_name else ""
             kb.append([
                 InlineKeyboardButton(
-                    text=f"📌 №{oid}: {title}{client_str}",
+                    text=f"{icon} №{oid}: {title}{client_str}",
                     callback_data=f"view_order_{oid}"
                 )
             ])
 
         await callback.message.edit_text(
-            "⏳ **Завдання в роботі:**",
+            list_title,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
         )
 
     else:
         await callback.answer("❌ Помилка під час видалення.", show_alert=True)
+
+
+# --- ПОЗНАЧЕННЯ ЗАВДАННЯ ЯК ВИКОНАНОГО ---
+
+@router.callback_query(F.data.startswith("confirm_complete_order_"))
+async def confirm_complete_order_dialog(callback: types.CallbackQuery):
+    order_id = int(callback.data.split("_")[3])
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Так, виконано", callback_data=f"complete_order_now_{order_id}"),
+            InlineKeyboardButton(text="❌ Скасувати", callback_data=f"view_order_{order_id}")
+        ]
+    ])
+
+    await callback.message.edit_text(
+        "❓ **Позначити це завдання як виконане?**\nВоно переміститься зі списку \"Завдання в роботі\" до \"Виконані завдання\".",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+
+@router.callback_query(F.data.startswith("complete_order_now_"))
+async def complete_order_action(callback: types.CallbackQuery):
+    order_id = int(callback.data.split("_")[3])
+    success = await db.complete_order(order_id, callback.from_user.id)
+
+    if not success:
+        await callback.answer("❌ Помилка. Можливо, завдання вже виконане або видалене.", show_alert=True)
+        return
+
+    await callback.answer("✅ Завдання позначено як виконане!", show_alert=True)
+
+    # Повертаємось до списку завдань у роботі
+    orders = await db.get_user_orders(callback.from_user.id, status='in_progress')
+    if not orders:
+        await callback.message.edit_text("📭 У вас більше немає активних завдань у роботі.")
+        return
+
+    kb = []
+    for oid, title, first_name, last_name, _ in orders:
+        client_str = f" ({first_name} {last_name or ''})".strip() if first_name else ""
+        kb.append([
+            InlineKeyboardButton(
+                text=f"📌 №{oid}: {title}{client_str}",
+                callback_data=f"view_order_{oid}"
+            )
+        ])
+
+    await callback.message.edit_text(
+        "⏳ **Завдання в роботі:**",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb)
+    )
 
 
 # --- РЕДАГУВАННЯ ЗАВДАННЯ ---

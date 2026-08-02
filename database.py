@@ -303,3 +303,17 @@ async def update_order(order_id: int, user_id: int, title: str, items: list) -> 
 
         await db.commit()
         return True
+
+async def complete_order(order_id: int, user_id: int) -> bool:
+    """Позначення завдання як виконаного"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            """
+            UPDATE orders
+            SET status = 'completed', completed_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND user_id = ? AND status = 'in_progress'
+            """,
+            (order_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
