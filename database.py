@@ -352,3 +352,68 @@ async def delete_client(client_id: int, user_id: int) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+async def get_statistics(user_id: int, date_from: str = None, date_to: str = None):
+    """Підсумкова статистика по виконаних завданнях за період (за датою completed_at)"""
+    query = """
+        SELECT oi.item_type, oi.unit_price, oi.quantity, o.id, c.first_name, c.last_name
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        LEFT JOIN clients c ON o.client_id = c.id
+        WHERE o.user_id = ? AND o.status = 'completed'
+    """
+    params = [user_id]
+
+    if date_from:
+        query += " AND o.completed_at >= ?"
+        params.append(date_from)
+    if date_to:
+        query += " AND o.completed_at <= ?"
+        params.append(date_to)
+
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(query, params) as cursor:
+            rows = await cursor.fetchall()
+
+    orders_data = {}
+
+    for item_type, unit_price, quantity, order_id, first_name, last_name in rows:
+        cost = unit_price * quantity
+        client_name = f"{first_name} {last_name or ''}".strip() if first_name else "Без замовника"
+
+        entry = orders_data.setdefault(order_id, {"work": 0.0, "mat": 0.0, "client": client_name})
+        if item_type == "work":
+            entry["work"] += cost
+        else:
+            entry["mat"] += cost
+
+    total_work = sum(o["work"] for o in orders_data.values())
+    total_mat = sum(o["mat"] for o in orders_data.values())
+
+    client_revenue = {}
+    for o in orders_data.values():
+        revenue = o["work"] + o["mat"]
+        client_revenue[o["client"]] = client_revenue.get(o["client"], 0) + revenue
+
+    top_client, top_client_revenue = max(client_revenue.items(), key=lambda x: x[1]) if client_revenue else (None, 0)
+
+    return {
+        "order_count": len(orders_data),
+        "total_work": total_work,
+        "total_mat": total_mat,
+        "top_client": top_client,
+        "top_client_revenue": top_client_revenue,
+    }
+
+async def get_user_registration_date(user_id: int):
+    """Повертає дату реєстрації користувача у форматі 'YYYY-MM-DD'"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        async with db.execute(
+            "SELECT created_at FROM users WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+
+    if not row or not row[0]:
+        return None
+
+    return row[0].split(" ")[0]

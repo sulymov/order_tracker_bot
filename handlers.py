@@ -8,6 +8,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
 )
+from datetime import date, timedelta
+import calendar as pycalendar
 
 import database as db
 
@@ -1014,3 +1016,262 @@ async def edit_cancel_order(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer("Зміни скасовано.")
     await view_order_card_by_id(callback, order_id)
     await callback.message.answer("🚀 Продовжуємо роботу", reply_markup=main_keyboard())
+
+
+# --- СТАТИСТИКА ---
+
+class Stats(StatesGroup):
+    picking_range = State()
+
+
+MONTH_NAMES_UA = {
+    1: "Січень", 2: "Лютий", 3: "Березень", 4: "Квітень",
+    5: "Травень", 6: "Червень", 7: "Липень", 8: "Серпень",
+    9: "Вересень", 10: "Жовтень", 11: "Листопад", 12: "Грудень",
+}
+
+
+def get_last_complete_week():
+    today = date.today()
+    this_monday = today - timedelta(days=today.weekday())
+    last_monday = this_monday - timedelta(days=7)
+    last_sunday = this_monday - timedelta(days=1)
+    return last_monday, last_sunday
+
+
+def get_last_complete_month():
+    today = date.today()
+    first_of_this_month = today.replace(day=1)
+    last_day_prev_month = first_of_this_month - timedelta(days=1)
+    first_day_prev_month = last_day_prev_month.replace(day=1)
+    return first_day_prev_month, last_day_prev_month
+
+
+def get_last_complete_quarter():
+    today = date.today()
+    current_q_first_month = (today.month - 1) // 3 * 3 + 1
+    first_day_this_quarter = date(today.year, current_q_first_month, 1)
+    last_day_prev_quarter = first_day_this_quarter - timedelta(days=1)
+    prev_q_first_month = (last_day_prev_quarter.month - 1) // 3 * 3 + 1
+    first_day_prev_quarter = date(last_day_prev_quarter.year, prev_q_first_month, 1)
+    return first_day_prev_quarter, last_day_prev_quarter
+
+
+def get_last_complete_year():
+    last_year = date.today().year - 1
+    return date(last_year, 1, 1), date(last_year, 12, 31)
+
+
+PERIOD_META = {
+    "week": ("тиждень", get_last_complete_week, 7),
+    "month": ("місяць", get_last_complete_month, 30),
+    "quarter": ("квартал", get_last_complete_quarter, 90),
+    "year": ("рік", get_last_complete_year, 365),
+}
+
+
+def build_stats_menu_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📅 Тиждень", callback_data="stats_period_week"),
+            InlineKeyboardButton(text="📅 Місяць", callback_data="stats_period_month"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 Квартал", callback_data="stats_period_quarter"),
+            InlineKeyboardButton(text="📅 Рік", callback_data="stats_period_year"),
+        ],
+        [InlineKeyboardButton(text="📊 Весь період", callback_data="stats_period_all")],
+        [InlineKeyboardButton(text="🗓 Обрати діапазон", callback_data="stats_range_start")],
+    ])
+
+
+@router.message(F.text == "📊 Статистика")
+async def show_statistics_menu(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "📊 **Статистика**\nОбери період:",
+        parse_mode="Markdown",
+        reply_markup=build_stats_menu_kb(),
+    )
+
+
+@router.callback_query(F.data == "stats_menu")
+async def stats_menu_callback(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    await callback.message.edit_text(
+        "📊 **Статистика**\nОбери період:",
+        parse_mode="Markdown",
+        reply_markup=build_stats_menu_kb(),
+    )
+
+
+async def render_and_show_stats(callback: types.CallbackQuery, date_from, date_to, label: str):
+    user_id = callback.from_user.id
+    date_from_str = f"{date_from} 00:00:00" if date_from else None
+    date_to_str = f"{date_to} 23:59:59" if date_to else None
+    stats = await db.get_statistics(user_id, date_from_str, date_to_str)
+
+    text = f"📊 **Статистика за {label}**\n\n"
+    text += f"💰 Чистий дохід: {stats['total_work']:.2f} грн\n"
+    text += f"✅ Виконано завдань: {stats['order_count']}\n"
+    text += f"📉 Витрати на матеріали: {stats['total_mat']:.2f} грн\n"
+
+    if stats["top_client"]:
+        text += f"🏆 Топ-замовник: {stats['top_client']} ({stats['top_client_revenue']:.2f} грн)\n"
+    else:
+        text += "🏆 Топ-замовник: —\n"
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Інший період", callback_data="stats_menu")]
+    ])
+    await callback.message.edit_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+@router.callback_query(F.data == "stats_period_all")
+async def stats_period_all(callback: types.CallbackQuery):
+    await render_and_show_stats(callback, None, None, "весь період")
+
+
+@router.callback_query(F.data.in_([f"stats_period_{p}" for p in PERIOD_META]))
+async def stats_period_submenu(callback: types.CallbackQuery):
+    period = callback.data.split("_")[2]
+    label, _, rolling_days = PERIOD_META[period]
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"📆 Останній повний {label}", callback_data=f"stats_full_{period}")],
+        [InlineKeyboardButton(text=f"🔄 Останні {rolling_days} днів", callback_data=f"stats_rolling_{period}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="stats_menu")],
+    ])
+    await callback.message.edit_text(
+        f"📊 Період: **{label}**\nОбери варіант розрахунку:",
+        parse_mode="Markdown",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(F.data.startswith("stats_full_"))
+async def stats_full_period(callback: types.CallbackQuery):
+    period = callback.data.split("_")[2]
+    label, full_func, _ = PERIOD_META[period]
+    date_from, date_to = full_func()
+    range_str = f"{date_from.strftime('%d.%m.%Y')} – {date_to.strftime('%d.%m.%Y')}"
+    await render_and_show_stats(callback, date_from, date_to, f"останній повний {label} ({range_str})")
+
+
+@router.callback_query(F.data.startswith("stats_rolling_"))
+async def stats_rolling_period(callback: types.CallbackQuery):
+    period = callback.data.split("_")[2]
+    label, _, rolling_days = PERIOD_META[period]
+    date_to = date.today()
+    date_from = date_to - timedelta(days=rolling_days - 1)
+    range_str = f"{date_from.strftime('%d.%m.%Y')} – {date_to.strftime('%d.%m.%Y')}"
+    await render_and_show_stats(callback, date_from, date_to, f"останні {rolling_days} днів ({range_str})")
+
+
+# --- ВИБІР ДІАПАЗОНУ ЧЕРЕЗ КАЛЕНДАР ---
+
+def build_calendar_kb(year: int, month: int, min_date: date, max_date: date):
+    weekday_names = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Нд"]
+
+    header = [
+        InlineKeyboardButton(text="‹", callback_data=f"cal_nav_prev_{year}_{month}"),
+        InlineKeyboardButton(text=f"{MONTH_NAMES_UA[month]} {year}", callback_data="cal_noop"),
+        InlineKeyboardButton(text="›", callback_data=f"cal_nav_next_{year}_{month}"),
+    ]
+    weekday_row = [InlineKeyboardButton(text=d, callback_data="cal_noop") for d in weekday_names]
+    rows = [header, weekday_row]
+
+    first_weekday, days_in_month = pycalendar.monthrange(year, month)
+    row = [InlineKeyboardButton(text=" ", callback_data="cal_noop") for _ in range(first_weekday)]
+
+    for day in range(1, days_in_month + 1):
+        current = date(year, month, day)
+        if current < min_date or current > max_date:
+            row.append(InlineKeyboardButton(text=f"·{day}·", callback_data="cal_noop"))
+        else:
+            row.append(InlineKeyboardButton(text=str(day), callback_data=f"cal_day_{year}_{month}_{day}"))
+        if len(row) == 7:
+            rows.append(row)
+            row = []
+
+    if row:
+        row += [InlineKeyboardButton(text=" ", callback_data="cal_noop") for _ in range(7 - len(row))]
+        rows.append(row)
+
+    rows.append([InlineKeyboardButton(text="❌ Скасувати", callback_data="stats_menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def show_calendar(callback: types.CallbackQuery, state: FSMContext, year: int, month: int):
+    data = await state.get_data()
+    min_date = date.fromisoformat(data["cal_min"])
+    max_date = date.fromisoformat(data["cal_max"])
+    picking = data.get("cal_picking", "from")
+    prompt = "Обери дату початку періоду:" if picking == "from" else "Обери дату кінця періоду:"
+
+    kb = build_calendar_kb(year, month, min_date, max_date)
+    await callback.message.edit_text(f"🗓 **{prompt}**", parse_mode="Markdown", reply_markup=kb)
+    await state.update_data(cal_year=year, cal_month=month)
+
+
+@router.callback_query(F.data == "stats_range_start")
+async def stats_range_start(callback: types.CallbackQuery, state: FSMContext):
+    reg_date_str = await db.get_user_registration_date(callback.from_user.id)
+    today = date.today()
+    min_date = date.fromisoformat(reg_date_str) if reg_date_str else today
+
+    await state.set_state(Stats.picking_range)
+    await state.update_data(cal_min=min_date.isoformat(), cal_max=today.isoformat(), cal_picking="from")
+    await show_calendar(callback, state, today.year, today.month)
+
+
+@router.callback_query(F.data == "cal_noop")
+async def cal_noop_handler(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("cal_nav_"))
+async def cal_nav_handler(callback: types.CallbackQuery, state: FSMContext):
+    _, _, direction, year, month = callback.data.split("_")
+    year, month = int(year), int(month)
+
+    if direction == "prev":
+        month -= 1
+        if month == 0:
+            month, year = 12, year - 1
+    else:
+        month += 1
+        if month == 13:
+            month, year = 1, year + 1
+
+    await show_calendar(callback, state, year, month)
+
+
+@router.callback_query(F.data.startswith("cal_day_"))
+async def cal_day_handler(callback: types.CallbackQuery, state: FSMContext):
+    _, _, year, month, day = callback.data.split("_")
+    selected = date(int(year), int(month), int(day))
+
+    data = await state.get_data()
+    min_date = date.fromisoformat(data["cal_min"])
+    max_date = date.fromisoformat(data["cal_max"])
+
+    if selected < min_date or selected > max_date:
+        await callback.answer("❌ Дата поза допустимим діапазоном.", show_alert=True)
+        return
+
+    picking = data.get("cal_picking", "from")
+
+    if picking == "from":
+        await state.update_data(
+            cal_date_from=selected.isoformat(),
+            cal_picking="to",
+            cal_min=selected.isoformat(),
+        )
+        await callback.answer(f"Початок: {selected.strftime('%d.%m.%Y')}")
+        await show_calendar(callback, state, selected.year, selected.month)
+    else:
+        date_from = date.fromisoformat(data["cal_date_from"])
+        date_to = selected
+        await state.clear()
+        label = f"{date_from.strftime('%d.%m.%Y')} – {date_to.strftime('%d.%m.%Y')}"
+        await render_and_show_stats(callback, date_from, date_to, label)
