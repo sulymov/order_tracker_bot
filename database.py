@@ -417,3 +417,13 @@ async def get_user_registration_date(user_id: int):
         return None
 
     return row[0].split(" ")[0]
+
+async def set_user_status(user_id: int, status: str) -> bool:
+    """Оновлення статусу користувача (active / blocked / pending)"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        cursor = await db.execute(
+            "UPDATE users SET status = ? WHERE user_id = ?",
+            (status, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0

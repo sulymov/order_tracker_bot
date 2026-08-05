@@ -1275,3 +1275,48 @@ async def cal_day_handler(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
         label = f"{date_from.strftime('%d.%m.%Y')} – {date_to.strftime('%d.%m.%Y')}"
         await render_and_show_stats(callback, date_from, date_to, label)
+
+
+# --- СХВАЛЕННЯ / ВІДХИЛЕННЯ НОВИХ КОРИСТУВАЧІВ ---
+
+@router.callback_query(F.data.startswith("approve_user_"))
+async def approve_user_handler(callback: types.CallbackQuery):
+    target_user_id = int(callback.data.split("_")[2])
+    success = await db.set_user_status(target_user_id, "active")
+
+    if not success:
+        await callback.answer("❌ Не вдалося знайти користувача.", show_alert=True)
+        return
+
+    await callback.message.edit_text(callback.message.text + "\n\n✅ Схвалено")
+    await callback.answer("Користувача схвалено")
+
+    try:
+        await callback.bot.send_message(
+            target_user_id,
+            "🎉 Вашу заявку на доступ схвалено! Тепер можете користуватись ботом.",
+            reply_markup=main_keyboard(),
+        )
+    except Exception:
+        pass
+
+
+@router.callback_query(F.data.startswith("reject_user_"))
+async def reject_user_handler(callback: types.CallbackQuery):
+    target_user_id = int(callback.data.split("_")[2])
+    success = await db.set_user_status(target_user_id, "blocked")
+
+    if not success:
+        await callback.answer("❌ Не вдалося знайти користувача.", show_alert=True)
+        return
+
+    await callback.message.edit_text(callback.message.text + "\n\n❌ Відхилено")
+    await callback.answer("Заявку відхилено")
+
+    try:
+        await callback.bot.send_message(
+            target_user_id,
+            "❌ На жаль, доступ до бота відхилено.",
+        )
+    except Exception:
+        pass

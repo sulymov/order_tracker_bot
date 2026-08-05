@@ -45,12 +45,25 @@ async def cmd_start(message: types.Message):
         )
 
         if ADMIN_ID:
+            approve_kb = types.InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text="✅ Схвалити",
+                        callback_data=f"approve_user_{message.from_user.id}",
+                    ),
+                    types.InlineKeyboardButton(
+                        text="❌ Відхилити",
+                        callback_data=f"reject_user_{message.from_user.id}",
+                    ),
+                ]
+            ])
             await bot.send_message(
                 ADMIN_ID,
                 f"🔔 *Нова заявка на доступ!*\n\n"
                 f"Користувач: {message.from_user.full_name} (@{message.from_user.username})\n"
                 f"ID: `{message.from_user.id}`",
                 parse_mode=ParseMode.MARKDOWN,
+                reply_markup=approve_kb,
             )
         return
 
