@@ -59,10 +59,9 @@ async def cmd_start(message: types.Message):
             ])
             await bot.send_message(
                 ADMIN_ID,
-                f"🔔 *Нова заявка на доступ!*\n\n"
+                f"🔔 Нова заявка на доступ!\n\n"
                 f"Користувач: {message.from_user.full_name} (@{message.from_user.username})\n"
-                f"ID: `{message.from_user.id}`",
-                parse_mode=ParseMode.MARKDOWN,
+                f"ID: {message.from_user.id}",
                 reply_markup=approve_kb,
             )
         return
